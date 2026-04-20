@@ -2,8 +2,6 @@ import os
 import uuid
 import base64
 import re
-import cv2
-import numpy as np
 from io import BytesIO
 from typing import Optional, List, Dict, Any, Tuple
 from contextlib import asynccontextmanager
@@ -31,7 +29,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="OCR Image Recognition API",
     description="Local OCR service for image captcha recognition using PaddleOCR",
-    version="4.0.0",
+    version="5.0.0",
     lifespan=lifespan
 )
 
@@ -69,57 +67,26 @@ def cleanup_file(file_path: str):
     except Exception:
         pass
 
-def preprocess_captcha(image: Image.Image) -> Tuple[Image.Image, List[str]]:
+def preprocess_image(image: Image.Image) -> Tuple[Image.Image, List[str]]:
     steps = []
     
     if image.mode != "RGB":
         image = image.convert("RGB")
     
-    original_width, original_height = image.width, image.height
-    steps.append(f"Original size: {original_width}x{original_height}")
+    width, height = image.size
+    if width < 200 or height < 60:
+        scale = max(200/width, 60/height)
+        new_w = int(width * scale)
+        new_h = int(height * scale)
+        image = image.resize((new_w, new_h), Image.LANCZOS)
+        steps.append(f"Upscale from {width}x{height} to {new_w}x{new_h}")
     
     img_gray = image.convert("L")
-    
     enhancer = ImageEnhance.Contrast(img_gray)
-    img_gray = enhancer.enhance(2.0)
-    steps.append("Contrast enhancement (2.0x)")
+    img_enhanced = enhancer.enhance(1.5)
+    steps.append("Light contrast enhancement")
     
-    enhancer = ImageEnhance.Brightness(img_gray)
-    img_gray = enhancer.enhance(1.0)
-    steps.append("Brightness enhancement (1.0x)")
-    
-    img_array = np.array(img_gray)
-    
-    _, binary = cv2.threshold(img_array, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    steps.append("Otsu thresholding")
-    
-    kernel = np.ones((2, 2), np.uint8)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-    steps.append("Morphological operations (close + open)")
-    
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    
-    min_area = 15
-    cleaned = np.zeros_like(binary)
-    
-    for i in range(1, num_labels):
-        if stats[i, cv2.CC_STAT_AREA] >= min_area:
-            cleaned[labels == i] = 0
-        else:
-            cleaned[labels == i] = 255
-    
-    steps.append(f"Connected components filtering (min_area={min_area})")
-    
-    cleaned_pil = Image.fromarray(cleaned).convert("RGB")
-    
-    scale_factor = 3
-    new_width = original_width * scale_factor
-    new_height = original_height * scale_factor
-    cleaned_pil = cleaned_pil.resize((new_width, new_height), Image.LANCZOS)
-    steps.append(f"Upscale {scale_factor}x to {new_width}x{new_height}")
-    
-    return cleaned_pil, steps
+    return img_enhanced.convert("RGB"), steps
 
 def parse_ocr_result(result) -> Tuple[List[OCRResult], str]:
     texts = []
@@ -146,7 +113,6 @@ def parse_ocr_result(result) -> Tuple[List[OCRResult], str]:
                 confidence = float(rec_scores[i]) if i < len(rec_scores) else 0.0
                 
                 bbox = None
-                
                 if i < len(rec_polys):
                     poly = rec_polys[i]
                     if hasattr(poly, 'tolist'):
@@ -181,13 +147,6 @@ async def ocr_upload(
     if language not in ocr_models:
         language = "general"
 
-    if not file.content_type or not file.content_type.startswith('image/'):
-        raise HTTPException(status_code=400, detail="File must be an image")
-
-    supported_formats = ['image/png', 'image/jpeg', 'image/jpg', 'image/bmp', 'image/webp']
-    if file.content_type not in supported_formats:
-        raise HTTPException(status_code=400, detail=f"Unsupported image format. Supported: {supported_formats}")
-
     image_id = uuid.uuid4().hex
     file_path = None
 
@@ -198,7 +157,7 @@ async def ocr_upload(
         file_path = save_upload_file(file, suffix)
 
         image = Image.open(file_path)
-        processed_image, steps = preprocess_captcha(image)
+        processed_image, steps = preprocess_image(image)
         
         processed_path = file_path.replace(suffix, "_processed.png")
         processed_image.save(processed_path)
@@ -246,7 +205,7 @@ async def ocr_base64(
         if image.mode != "RGB":
             image = image.convert("RGB")
 
-        processed_image, steps = preprocess_captcha(image)
+        processed_image, steps = preprocess_image(image)
 
         temp_dir = os.path.join(os.path.dirname(__file__), "temp")
         os.makedirs(temp_dir, exist_ok=True)
@@ -278,19 +237,17 @@ async def ocr_url(request: URLOCRRequest):
     import requests as req
     
     language = request.language if request.language in ocr_models else "general"
-    
     image_id = uuid.uuid4().hex
 
     try:
         response = req.get(request.image_url, timeout=30)
         response.raise_for_status()
-        
         image = Image.open(BytesIO(response.content))
         
         if image.mode != "RGB":
             image = image.convert("RGB")
 
-        processed_image, steps = preprocess_captcha(image)
+        processed_image, steps = preprocess_image(image)
 
         temp_dir = os.path.join(os.path.dirname(__file__), "temp")
         os.makedirs(temp_dir, exist_ok=True)
@@ -298,7 +255,6 @@ async def ocr_url(request: URLOCRRequest):
         processed_image.save(file_path)
 
         result = ocr_models[language].ocr(file_path)
-
         texts, full_text = parse_ocr_result(result)
 
         return OCRResponse(
@@ -321,18 +277,12 @@ async def ocr_url(request: URLOCRRequest):
 async def root():
     return {
         "service": "OCR Image Recognition API",
-        "version": "4.0.0",
-        "features": {
-            "noise_removal": "CV2-based noise and interference line removal",
-            "connected_components": "Remove small noise dots using connected components analysis",
-            "adaptive_thresholding": "Otsu thresholding for optimal binarization",
-            "image_upscaling": "3x upscale for better character recognition"
-        },
+        "version": "5.0.0",
         "endpoints": {
-            "POST /ocr/upload": "Upload an image file for OCR recognition",
-            "POST /ocr/base64": "Send base64 encoded image for OCR recognition",
-            "POST /ocr/url": "Send image URL for OCR recognition",
-            "GET /health": "Health check endpoint"
+            "POST /ocr/upload": "Upload image file",
+            "POST /ocr/base64": "Base64 image data",
+            "POST /ocr/url": "Image URL",
+            "GET /health": "Health check"
         }
     }
 
