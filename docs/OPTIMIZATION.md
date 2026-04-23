@@ -6,6 +6,7 @@
 - [3. 优化方案](#3-优化方案)
 - [4. 实施步骤](#4-实施步骤)
 - [5. 预期效果](#5-预期效果)
+- [6. 训练数据收集](#6-训练数据收集)
 
 ---
 
@@ -30,6 +31,7 @@
 | v5.0 | 轻量预处理 | ~60% | 上采样+对比度增强 |
 | v6.0 | 多策略集成+后处理 | ~60% | 4种预处理策略+投票+字符纠错 |
 | **v7.0** | **智能纠错引擎** | **90%** | **混淆矩阵+Levenshtein+候选生成** |
+| **v8.0** | **训练数据收集** | - | **自动收集处理图片用于后期训练** |
 
 ---
 
@@ -386,18 +388,121 @@ data/
 
 ---
 
-## 6. 参考资料
+## 6. 训练数据收集
 
-### 6.1 PaddleOCR 官方文档
+### 6.1 功能概述
+
+v8.0 新增**自动训练数据收集**功能，每次 OCR 识别请求都会保存：
+
+- **原始图片**: 上传的原始验证码图片
+- **4 种预处理结果**: v1_light, v2_medium, v3_binary, v4_denoise
+- **OCR 识别结果**: 每种策略的识别文本
+- **元数据 JSON**: 完整的识别信息和处理步骤
+
+### 6.2 目录结构
+
+```
+data/collected/
+├── original/           # 原始图片 (image_id.png)
+├── v1_light/          # v1 轻量预处理结果
+├── v2_medium/         # v2 中等预处理结果
+├── v3_binary/          # v3 二值化预处理结果
+├── v4_denoise/         # v4 降噪预处理结果
+└── metadata/           # JSON 元数据文件
+    └── {image_id}.json
+```
+
+### 6.3 元数据格式
+
+```json
+{
+  "image_id": "a1b2c3d4e5f6",
+  "final_text": "2zrw",
+  "corrected_text": null,
+  "strategies": {
+    "v1": {
+      "ocr_result": "2zrw",
+      "preprocessing_steps": ["v1:Light", "Upscale to 200x80", "Contrast+1.5x"]
+    },
+    "v2": {
+      "ocr_result": "2zrw",
+      "preprocessing_steps": ["v2:Medium", "Upscale to 200x80", "Contrast+2.0x", "Sharpness+1.5x"]
+    },
+    ...
+  }
+}
+```
+
+### 6.4 使用方法
+
+#### 1. 部署服务
+
+```bash
+# 启动服务（已自动创建 data/collected 目录）
+docker-compose up -d
+
+# 或本地运行
+python run.py
+```
+
+#### 2. 调用 API
+
+```bash
+# 上传验证码图片
+curl -X POST http://localhost:8000/ocr/upload \
+  -F "file=@your_captcha.png" \
+  -F "language=general"
+```
+
+#### 3. 查看收集的数据
+
+```bash
+# 查看目录结构
+ls -la data/collected/
+
+# 查看收集的图片数量
+find data/collected -name "*.png" | wc -l
+
+# 查看元数据
+cat data/collected/metadata/*.json | head -20
+```
+
+### 6.5 训练数据准备
+
+收集足够数据后，可用于模型 Fine-tuning：
+
+```bash
+# 1. 统计收集的数据量
+find data/collected/original -name "*.png" | wc -l
+
+# 2. 生成训练标注文件
+python scripts/generate_labels_from_collected.py
+
+# 3. 使用 PaddleX 训练
+paddlex --task OCR --train --dataset ./data/finetune
+```
+
+### 6.6 注意事项
+
+- ⚠️ **data/collected/** 目录已添加到 `.gitignore`，不会被提交到 Git
+- ⚠️ 定期备份重要训练数据
+- ⚠️ 建议收集 **1000+** 张图片后再进行 Fine-tuning
+- ⚠️ 确保收集的数据多样性，避免过拟合
+
+---
+
+## 7. 参考资料
+
+### 7.1 PaddleOCR 官方文档
 - [PaddleOCR GitHub](https://github.com/PaddlePaddle/PaddleOCR)
 - [Fine-tune 指南](https://github.com/PaddlePaddle/PaddleOCR/blob/release/2.7/doc/doc_ch/finetune.md)
 - [模型训练](https://github.com/PaddlePaddle/PaddleOCR/blob/release/2.7/doc/doc_ch/training.md)
 
-### 6.2 相关论文
+### 7.2 相关论文
 - PP-OCRv5: Latest OCR System from Baidu
 - DB: Differentiable Binarization for Text Detection
 - CRNN: Convolutional Recurrent Neural Network
 
-### 6.3 工具
+### 7.3 工具
 - [PaddleX](https://github.com/PaddlePaddle/PaddleX) - 可视化训练工具
 - [Label Studio](https://labelstud.io/) - 数据标注工具

@@ -77,6 +77,65 @@ def cleanup_file(file_path: str):
         pass
 
 
+TRAIN_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "collected")
+
+def get_train_dirs():
+    return {
+        "original": os.path.join(TRAIN_DATA_DIR, "original"),
+        "v1": os.path.join(TRAIN_DATA_DIR, "v1_light"),
+        "v2": os.path.join(TRAIN_DATA_DIR, "v2_medium"),
+        "v3": os.path.join(TRAIN_DATA_DIR, "v3_binary"),
+        "v4": os.path.join(TRAIN_DATA_DIR, "v4_denoise"),
+        "metadata": os.path.join(TRAIN_DATA_DIR, "metadata"),
+    }
+
+
+def save_training_data(
+    image_id: str,
+    original_image: Image.Image,
+    processed_images: Dict[str, Tuple[Image.Image, List[str]]],
+    ocr_results: Dict[str, str],
+    final_text: str,
+    corrected_text: str = None
+):
+    """保存训练数据用于后期模型 fine-tuning"""
+    try:
+        train_dirs = get_train_dirs()
+        
+        for dir_path in train_dirs.values():
+            os.makedirs(dir_path, exist_ok=True)
+        
+        original_path = os.path.join(train_dirs["original"], f"{image_id}.png")
+        original_image.save(original_path)
+        
+        metadata = {
+            "image_id": image_id,
+            "final_text": final_text,
+            "corrected_text": corrected_text,
+            "strategies": {}
+        }
+        
+        for strategy_name, (processed_img, steps) in processed_images.items():
+            dir_key = strategy_name.replace("preprocess_image_", "")
+            save_path = os.path.join(train_dirs[dir_key], f"{image_id}.png")
+            processed_img.save(save_path)
+            
+            metadata["strategies"][dir_key] = {
+                "ocr_result": ocr_results.get(strategy_name, ""),
+                "preprocessing_steps": steps
+            }
+        
+        import json
+        metadata_path = os.path.join(train_dirs["metadata"], f"{image_id}.json")
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+        
+        return True
+    except Exception as e:
+        print(f"Failed to save training data: {e}")
+        return False
+
+
 CHAR_CONFUSION_MAP = {
     '0': ['O', 'o', 'Q'],
     'O': ['0', 'o', 'Q'],
@@ -506,6 +565,8 @@ async def ocr_upload(
         best_texts = []
         best_steps = []
         best_confidence = -1
+        processed_images = {}
+        ocr_results = {}
         
         for strategy in preprocess_strategies:
             processed_image, steps = strategy(image)
@@ -515,11 +576,10 @@ async def ocr_upload(
             
             result = ocr_models[language].ocr(processed_path)
             
-            if os.path.exists(processed_path):
-                os.remove(processed_path)
-            
             texts, full_text = parse_ocr_result(result)
             all_full_texts.append(full_text)
+            processed_images[strategy.__name__] = (processed_image.copy(), steps)
+            ocr_results[strategy.__name__] = full_text
             
             avg_confidence = 0.0
             if texts:
@@ -549,6 +609,15 @@ async def ocr_upload(
             final_full_text = "".join([t.text for t in best_texts])
             final_full_text = re.sub(r'\s+', '', final_full_text)
             final_full_text = smart_correct(final_full_text, expected_length=4)
+        
+        save_training_data(
+            image_id=image_id,
+            original_image=image,
+            processed_images=processed_images,
+            ocr_results=ocr_results,
+            final_text=voted_full_text if voted_full_text else final_full_text,
+            corrected_text=corrected if voted_full_text and corrected != voted_full_text else None
+        )
 
         return OCRResponse(
             success=True,
@@ -598,6 +667,8 @@ async def ocr_base64(
         best_texts = []
         best_steps = []
         best_confidence = -1
+        processed_images = {}
+        ocr_results = {}
         
         for strategy in preprocess_strategies:
             processed_image, steps = strategy(image)
@@ -609,11 +680,10 @@ async def ocr_base64(
 
             result = ocr_models[language].ocr(file_path)
             
-            if os.path.exists(file_path):
-                cleanup_file(file_path)
-            
             texts, full_text = parse_ocr_result(result)
             all_full_texts.append(full_text)
+            processed_images[strategy.__name__] = (processed_image.copy(), steps)
+            ocr_results[strategy.__name__] = full_text
             
             avg_confidence = 0.0
             if texts:
@@ -641,6 +711,15 @@ async def ocr_base64(
             final_texts = best_texts
         
         final_steps = best_steps + ["Multi-strategy voting applied", "Smart correction enabled"]
+        
+        save_training_data(
+            image_id=image_id,
+            original_image=image,
+            processed_images=processed_images,
+            ocr_results=ocr_results,
+            final_text=voted_full_text if voted_full_text else final_full_text,
+            corrected_text=corrected if voted_full_text and corrected != voted_full_text else None
+        )
 
         return OCRResponse(
             success=True,
@@ -685,6 +764,8 @@ async def ocr_url(request: URLOCRRequest):
         best_texts = []
         best_steps = []
         best_confidence = -1
+        processed_images = {}
+        ocr_results = {}
         
         for strategy in preprocess_strategies:
             processed_image, steps = strategy(image)
@@ -696,11 +777,10 @@ async def ocr_url(request: URLOCRRequest):
 
             result = ocr_models[language].ocr(file_path)
             
-            if os.path.exists(file_path):
-                cleanup_file(file_path)
-            
             texts, full_text = parse_ocr_result(result)
             all_full_texts.append(full_text)
+            processed_images[strategy.__name__] = (processed_image.copy(), steps)
+            ocr_results[strategy.__name__] = full_text
             
             avg_confidence = 0.0
             if texts:
@@ -728,6 +808,15 @@ async def ocr_url(request: URLOCRRequest):
             final_texts = best_texts
         
         final_steps = best_steps + ["Multi-strategy voting applied", "Smart correction enabled"]
+        
+        save_training_data(
+            image_id=image_id,
+            original_image=image,
+            processed_images=processed_images,
+            ocr_results=ocr_results,
+            final_text=voted_full_text if voted_full_text else final_full_text,
+            corrected_text=corrected if voted_full_text and corrected != voted_full_text else None
+        )
 
         return OCRResponse(
             success=True,

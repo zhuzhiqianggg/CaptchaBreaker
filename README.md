@@ -197,6 +197,44 @@ See [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md) for detailed improvement strate
 | Image Processing | Pillow + OpenCV | 10.4.0 + 4.10.0 |
 | Numerical Computing | NumPy | 1.26.4 |
 
+## Docker Deployment
+
+### Quick Start (3 Steps)
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/zhuzhiqianggg/CaptchaBreaker.git
+cd CaptchaBreaker
+
+# 2. Start the service
+docker-compose up -d
+
+# 3. Verify the deployment
+curl http://localhost:8000/health
+```
+
+### Docker Commands
+
+```bash
+# Build and start
+docker-compose up -d --build
+
+# View logs
+docker-compose logs -f
+
+# Stop service
+docker-compose down
+
+# Restart service
+docker-compose restart
+
+# Update to latest version
+git pull
+docker-compose up -d --build
+```
+
+For detailed deployment guide, see [docs/DOCKER.md](docs/DOCKER.md)
+
 ## Usage Examples
 
 ### Python
