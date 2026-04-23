@@ -17,6 +17,7 @@ from paddleocr import PaddleOCR
 
 ocr_models = {}
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     ocr_models["general"] = PaddleOCR(lang='ch')
@@ -26,17 +27,20 @@ async def lifespan(app: FastAPI):
     ocr_models.clear()
     print("PaddleOCR models unloaded")
 
+
 app = FastAPI(
-    title="OCR Image Recognition API",
-    description="Local OCR service for image captcha recognition using PaddleOCR",
+    title="CaptchaBreaker API",
+    description="Local OCR service for captcha recognition using PaddleOCR",
     version="5.0.0",
     lifespan=lifespan
 )
+
 
 class OCRResult(BaseModel):
     text: str
     confidence: float
     bounding_box: Optional[Dict[str, float]] = None
+
 
 class OCRResponse(BaseModel):
     success: bool
@@ -47,9 +51,11 @@ class OCRResponse(BaseModel):
     message: str
     preprocessing_applied: List[str] = []
 
+
 class URLOCRRequest(BaseModel):
     image_url: str
     language: str = "general"
+
 
 def save_upload_file(upload_file: UploadFile, suffix: str = ".png") -> str:
     temp_dir = os.path.join(os.path.dirname(__file__), "temp")
@@ -60,12 +66,14 @@ def save_upload_file(upload_file: UploadFile, suffix: str = ".png") -> str:
         f.write(content)
     return file_path
 
+
 def cleanup_file(file_path: str):
     try:
         if os.path.exists(file_path):
             os.remove(file_path)
     except Exception:
         pass
+
 
 def preprocess_image(image: Image.Image) -> Tuple[Image.Image, List[str]]:
     steps = []
@@ -87,6 +95,7 @@ def preprocess_image(image: Image.Image) -> Tuple[Image.Image, List[str]]:
     steps.append("Light contrast enhancement")
     
     return img_enhanced.convert("RGB"), steps
+
 
 def parse_ocr_result(result) -> Tuple[List[OCRResult], str]:
     texts = []
@@ -139,6 +148,7 @@ def parse_ocr_result(result) -> Tuple[List[OCRResult], str]:
 
     return texts, full_text
 
+
 @app.post("/ocr/upload", response_model=OCRResponse)
 async def ocr_upload(
     file: UploadFile = File(...),
@@ -184,6 +194,7 @@ async def ocr_upload(
     finally:
         if file_path:
             cleanup_file(file_path)
+
 
 @app.post("/ocr/base64", response_model=OCRResponse)
 async def ocr_base64(
@@ -232,6 +243,7 @@ async def ocr_base64(
         if file_path:
             cleanup_file(file_path)
 
+
 @app.post("/ocr/url", response_model=OCRResponse)
 async def ocr_url(request: URLOCRRequest):
     import requests as req
@@ -273,10 +285,11 @@ async def ocr_url(request: URLOCRRequest):
         if file_path:
             cleanup_file(file_path)
 
+
 @app.get("/")
 async def root():
     return {
-        "service": "OCR Image Recognition API",
+        "service": "CaptchaBreaker OCR API",
         "version": "5.0.0",
         "endpoints": {
             "POST /ocr/upload": "Upload image file",
@@ -286,9 +299,11 @@ async def root():
         }
     }
 
+
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "ocr_models_loaded": len(ocr_models) > 0}
+
 
 if __name__ == "__main__":
     import uvicorn

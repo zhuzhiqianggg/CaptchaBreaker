@@ -13,14 +13,16 @@ build/
 
 # Temporary files
 temp/
-*.png
-!crop_test.png
 
 # Test results
-ocr_*.json
+*.json
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# OS
+.DS_Store
+Thumbs.db
