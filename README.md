@@ -89,6 +89,9 @@ CaptchaBreaker/
 ├── run.py                        # Application entry point
 ├── requirements.txt              # Python dependencies
 ├── .gitignore                    # Git ignore rules
+├── Dockerfile                    # Docker image configuration
+├── docker-compose.yml           # Docker Compose configuration
+├── .dockerignore                # Docker build ignore rules
 └── README.md                     # This file
 ```
 

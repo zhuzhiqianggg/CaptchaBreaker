@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  ocr-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: captcha-breaker
+    image: captcha-breaker:7.0.0
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./app:/app/app
+    environment:
+      - TZ=Asia/Shanghai
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - ocr-network
+
+networks:
+  ocr-network:
+    driver: bridge
