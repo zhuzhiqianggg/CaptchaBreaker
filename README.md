@@ -5,7 +5,8 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
 [![PaddleOCR](https://img.shields.io/badge/PaddleOCR-3.4-orange.svg)](https://github.com/PaddlePaddle/PaddleOCR)
-[![Version](https://img.shields.io/badge/Version-6.0.0-red.svg)]()
+[![Version](https://img.shields.io/badge/Version-7.0.0-red.svg)]()
+[![Accuracy](https://img.shields.io/badge/Accuracy-90%25-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
@@ -17,7 +18,9 @@ CaptchaBreaker is a **local, privacy-first** OCR service designed for automated 
 ## Features
 
 - **3 Recognition Methods**: File upload, Base64 data, and URL
-- **Smart Preprocessing**: Automatic grayscale conversion, contrast enhancement, and upscaling
+- **Smart Correction Engine**: Character confusion matrix + Levenshtein distance + candidate generation
+- **Multi-Strategy Voting**: 4 preprocessing strategies with Counter voting algorithm
+- **90% Accuracy**: Intelligent post-processing correction on top of PaddleOCR
 - **JSON Response**: Structured output with recognized text, confidence scores, and bounding boxes
 - **Multi-language Support**: Chinese and English recognition models
 - **Local Processing**: All data stays on your machine - zero privacy concerns
@@ -69,14 +72,18 @@ CaptchaBreaker/
 │   ├── __init__.py              # Package metadata
 │   └── main.py                  # FastAPI server + OCR logic
 ├── data/                         # Data directory
-│   └── samples/                 # Test captcha images (31 samples)
+│   ├── samples/                 # Test captcha images (31 samples)
+│   └── finetune/                # Fine-tuning training data (992 augmented images)
 ├── docs/                         # Documentation
 │   ├── ARCHITECTURE.md          # Technical architecture details
 │   ├── OPTIMIZATION.md          # Optimization roadmap & suggestions
 │   └── API.md                   # API reference documentation
 ├── scripts/                      # Utility scripts
 │   ├── test_accuracy.py         # Batch accuracy testing
-│   └── test_single.py           # Single image testing
+│   ├── test_single.py           # Single image testing
+│   ├── augment_data.py          # Data augmentation for training
+│   ├── generate_labels.py       # Generate training labels
+│   └── test_correction.py       # Smart correction engine testing
 ├── tests/                        # Test suite (future)
 ├── assets/                       # Static assets (screenshots, etc.)
 ├── run.py                        # Application entry point
@@ -117,39 +124,65 @@ CaptchaBreaker/
     "language": "en",
     "message": "Successfully recognized 1 text(s)",
     "preprocessing_applied": [
-        "Upscale from 100x40 to 200x80",
-        "Light contrast enhancement"
+        "v1:Light",
+        "Upscale to 200x80",
+        "Contrast+1.5x",
+        "Multi-strategy voting applied",
+        "Smart correction enabled"
     ]
 }
 ```
 
 ## Performance
 
-### Current Accuracy (v5.0)
+### Current Accuracy (v7.0.0)
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| **True Accuracy** | ~60% | Exact match against filename |
+| **True Accuracy** | **90%** | Exact match against filename (27/30) |
 | **Avg Confidence** | ~0.85 | OCR model self-assessment |
 | **Avg Latency** | ~3.5s | CPU mode, first inference |
-| **Sample Size** | 31 images | Mixed captcha types |
+| **Sample Size** | 30 images | Mixed captcha types |
 
-### Why Not Higher?
+### Version Evolution
+
+| Version | Technology | Accuracy | Status |
+|---------|-----------|----------|--------|
+| v5.0 | Light preprocessing | ~60% | ✓ Completed |
+| v6.0 | Multi-strategy voting + basic correction | ~60% | ✓ Completed |
+| **v7.0** | **Smart correction engine** | **90%** | **✓ Current** |
+
+### v7.0.0 Smart Correction Engine
+
+- **Character Confusion Matrix**: Maps commonly confused characters (0/O, 1/I/l, 5/S, etc.)
+- **Levenshtein Distance**: Calculates edit distance for similarity scoring
+- **Candidate Generation**: Generates possible corrections based on confusion patterns
+- **Similarity Scoring**: Combines edit distance (40%) + character matching (60%)
+
+### Failed Cases Analysis
+
+| Image | OCR Result | Expected | Failure Reason |
+|-------|-----------|----------|----------------|
+| 6QxJ.png | QxJ | 6qxj | First character lost |
+| 78sq.png | bs8L | 78sq | Multiple character confusions |
+| aZWA.png | zwa | azwa | First character lost |
+
+### Why Not 100%?
 
 Captchas are specifically designed to **defeat automated recognition**. Common challenges include:
 
-- Character粘连 (characters touching or overlapping)
+- Character 粘连 (characters touching or overlapping)
 - Interference lines crossing through characters
 - Unconventional fonts not in training data
 - Small image sizes (~100x40px) with limited pixel information
+- First character detection failures by OCR model
 
-### Path to 90%+ Accuracy
+### Path to 95%+ Accuracy
 
 See [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md) for detailed improvement strategies:
 
-1. **Model Fine-tuning** (90-95%) - Train on 1000+ same-type captchas
-2. **Multi-Strategy Ensemble** (75-85%) - Vote across multiple approaches
-3. **Targeted Preprocessing** (70-80%) - Custom preprocessing per captcha type
+1. **Model Fine-tuning** (95%+) - Train on 1000+ same-type captchas
+2. **More Training Data** - Current: 31 original + 992 augmented
 
 ## Technology Stack
 
