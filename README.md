@@ -5,6 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
 [![PaddleOCR](https://img.shields.io/badge/PaddleOCR-3.4-orange.svg)](https://github.com/PaddlePaddle/PaddleOCR)
+[![Version](https://img.shields.io/badge/Version-6.0.0-red.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---

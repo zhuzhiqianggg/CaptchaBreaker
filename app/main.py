@@ -2,16 +2,18 @@ import os
 import uuid
 import base64
 import re
+import statistics
 from io import BytesIO
 from typing import Optional, List, Dict, Any, Tuple
 from contextlib import asynccontextmanager
+from collections import Counter
 
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 
 from paddleocr import PaddleOCR
 
@@ -31,7 +33,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="CaptchaBreaker API",
     description="Local OCR service for captcha recognition using PaddleOCR",
-    version="5.0.0",
+    version="6.0.0",
     lifespan=lifespan
 )
 
@@ -75,8 +77,49 @@ def cleanup_file(file_path: str):
         pass
 
 
-def preprocess_image(image: Image.Image) -> Tuple[Image.Image, List[str]]:
-    steps = []
+CHAR_CONFUSION_MAP = {
+    '0': ['O', 'o', 'Q'],
+    'O': ['0', 'o', 'Q'],
+    'o': ['0', 'O', 'Q'],
+    '1': ['I', 'l', 'i', 'L'],
+    'I': ['1', 'l', 'i', 'L'],
+    'l': ['1', 'I', 'i', 'L'],
+    'i': ['1', 'I', 'l', 'L'],
+    'L': ['1', 'I', 'l', 'i'],
+    '2': ['Z', 'z'],
+    'Z': ['2', 'z'],
+    '5': ['S', 's'],
+    'S': ['5', 's'],
+    '6': ['b', 'G'],
+    'b': ['6', 'G'],
+    '8': ['B', 'B'],
+    'B': ['8', 'B'],
+    '9': ['g', 'q'],
+    'g': ['9', 'q'],
+    'q': ['9', 'g'],
+    'm': ['rn', 'nn'],
+    'w': ['vv', 'W'],
+    'W': ['w', 'VV'],
+    'vv': ['w', 'W'],
+}
+
+COMMON_PATTERNS = {
+    'rn': 'm',
+    'cl': 'd',
+    'vv': 'w',
+    'VV': 'W',
+}
+
+def post_process_text(text: str) -> str:
+    corrected = text
+    for pattern, replacement in COMMON_PATTERNS.items():
+        corrected = corrected.replace(pattern, replacement)
+    return corrected
+
+
+def preprocess_image_v1(image: Image.Image) -> Tuple[Image.Image, List[str]]:
+    """v1: 轻量级预处理 (当前 v5.0 策略)"""
+    steps = ["v1:Light"]
     
     if image.mode != "RGB":
         image = image.convert("RGB")
@@ -87,14 +130,89 @@ def preprocess_image(image: Image.Image) -> Tuple[Image.Image, List[str]]:
         new_w = int(width * scale)
         new_h = int(height * scale)
         image = image.resize((new_w, new_h), Image.LANCZOS)
-        steps.append(f"Upscale from {width}x{height} to {new_w}x{new_h}")
+        steps.append(f"Upscale to {new_w}x{new_h}")
     
     img_gray = image.convert("L")
     enhancer = ImageEnhance.Contrast(img_gray)
     img_enhanced = enhancer.enhance(1.5)
-    steps.append("Light contrast enhancement")
+    steps.append("Contrast+1.5x")
     
     return img_enhanced.convert("RGB"), steps
+
+
+def preprocess_image_v2(image: Image.Image) -> Tuple[Image.Image, List[str]]:
+    """v2: 中等增强 (对比度+锐化)"""
+    steps = ["v2:Medium"]
+    
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    
+    width, height = image.size
+    if width < 200 or height < 60:
+        scale = max(200/width, 60/height)
+        new_w = int(width * scale)
+        new_h = int(height * scale)
+        image = image.resize((new_w, new_h), Image.LANCZOS)
+        steps.append(f"Upscale to {new_w}x{new_h}")
+    
+    enhancer = ImageEnhance.Contrast(image)
+    image = enhancer.enhance(2.0)
+    steps.append("Contrast+2.0x")
+    
+    enhancer = ImageEnhance.Sharpness(image)
+    image = enhancer.enhance(1.5)
+    steps.append("Sharpness+1.5x")
+    
+    return image, steps
+
+
+def preprocess_image_v3(image: Image.Image) -> Tuple[Image.Image, List[str]]:
+    """v3: 二值化处理"""
+    steps = ["v3:Binarize"]
+    
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    
+    width, height = image.size
+    if width < 200 or height < 60:
+        scale = max(200/width, 60/height)
+        new_w = int(width * scale)
+        new_h = int(height * scale)
+        image = image.resize((new_w, new_h), Image.LANCZOS)
+        steps.append(f"Upscale to {new_w}x{new_h}")
+    
+    img_gray = image.convert("L")
+    
+    threshold = 128
+    img_bin = img_gray.point(lambda x: 255 if x > threshold else 0, '1')
+    steps.append(f"Binary threshold={threshold}")
+    
+    return img_bin.convert("RGB"), steps
+
+
+def preprocess_image_v4(image: Image.Image) -> Tuple[Image.Image, List[str]]:
+    """v4: 降噪处理"""
+    steps = ["v4:Denoise"]
+    
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    
+    width, height = image.size
+    if width < 200 or height < 60:
+        scale = max(200/width, 60/height)
+        new_w = int(width * scale)
+        new_h = int(height * scale)
+        image = image.resize((new_w, new_h), Image.LANCZOS)
+        steps.append(f"Upscale to {new_w}x{new_h}")
+    
+    image = image.filter(ImageFilter.MedianFilter(size=3))
+    steps.append("Median filter")
+    
+    enhancer = ImageEnhance.Contrast(image)
+    image = enhancer.enhance(1.3)
+    steps.append("Contrast+1.3x")
+    
+    return image, steps
 
 
 def parse_ocr_result(result) -> Tuple[List[OCRResult], str]:
@@ -149,6 +267,36 @@ def parse_ocr_result(result) -> Tuple[List[OCRResult], str]:
     return texts, full_text
 
 
+def vote_results(results: List[str]) -> str:
+    """对多个识别结果进行投票，选择最优结果"""
+    if not results:
+        return ""
+    
+    if len(results) == 1:
+        return results[0]
+    
+    cleaned_results = []
+    for r in results:
+        cleaned = re.sub(r'\s+', '', r).lower()
+        if cleaned:
+            cleaned_results.append(cleaned)
+    
+    if not cleaned_results:
+        return ""
+    
+    counter = Counter(cleaned_results)
+    most_common = counter.most_common()
+    
+    if most_common[0][1] > 1:
+        return most_common[0][0]
+    
+    lengths = [len(r) for r in cleaned_results]
+    avg_length = statistics.mean(lengths) if lengths else 0
+    closest = min(cleaned_results, key=lambda x: abs(len(x) - avg_length))
+    
+    return closest
+
+
 @app.post("/ocr/upload", response_model=OCRResponse)
 async def ocr_upload(
     file: UploadFile = File(...),
@@ -167,26 +315,78 @@ async def ocr_upload(
         file_path = save_upload_file(file, suffix)
 
         image = Image.open(file_path)
-        processed_image, steps = preprocess_image(image)
         
-        processed_path = file_path.replace(suffix, "_processed.png")
-        processed_image.save(processed_path)
+        preprocess_strategies = [
+            preprocess_image_v1,
+            preprocess_image_v2,
+            preprocess_image_v3,
+            preprocess_image_v4,
+        ]
         
-        result = ocr_models[language].ocr(processed_path)
+        all_full_texts = []
+        best_texts = []
+        best_steps = []
+        best_confidence = -1
         
-        if os.path.exists(processed_path):
-            os.remove(processed_path)
-
-        texts, full_text = parse_ocr_result(result)
+        for strategy in preprocess_strategies:
+            processed_image, steps = strategy(image)
+            
+            processed_path = file_path.replace(suffix, f"_processed_{strategy.__name__}.png")
+            processed_image.save(processed_path)
+            
+            result = ocr_models[language].ocr(processed_path)
+            
+            if os.path.exists(processed_path):
+                os.remove(processed_path)
+            
+            texts, full_text = parse_ocr_result(result)
+            all_full_texts.append(full_text)
+            
+            avg_confidence = 0.0
+            if texts:
+                avg_confidence = sum(t.confidence for t in texts) / len(texts)
+            
+            if avg_confidence > best_confidence:
+                best_confidence = avg_confidence
+                best_texts = texts
+                best_steps = steps
+        
+        voted_full_text = vote_results(all_full_texts)
+        
+        final_texts = best_texts
+        final_steps = best_steps + ["Multi-strategy voting applied"]
+        
+        if voted_full_text:
+            found_match = False
+            for i, text_obj in enumerate(best_texts):
+                if text_obj.text.lower() == voted_full_text.lower():
+                    found_match = True
+                    break
+            
+            if not found_match:
+                corrected_voted = post_process_text(voted_full_text)
+                final_texts = [OCRResult(
+                    text=corrected_voted,
+                    confidence=best_confidence,
+                    bounding_box=None
+                )]
+                final_full_text = corrected_voted
+            else:
+                final_full_text = voted_full_text
+        else:
+            final_full_text = "".join([t.text for t in best_texts])
+            final_full_text = re.sub(r'\s+', '', final_full_text)
+        
+        final_full_text = post_process_text(final_full_text)
 
         return OCRResponse(
             success=True,
             image_id=image_id,
-            texts=texts,
-            full_text=full_text,
+            texts=final_texts,
+            full_text=final_full_text,
             language=language,
-            message=f"Successfully recognized {len(texts)} text(s)",
-            preprocessing_applied=steps
+            message=f"Successfully recognized {len(final_texts)} text(s) with multi-strategy voting",
+            preprocessing_applied=final_steps
         )
 
     except Exception as e:
@@ -216,25 +416,79 @@ async def ocr_base64(
         if image.mode != "RGB":
             image = image.convert("RGB")
 
-        processed_image, steps = preprocess_image(image)
+        preprocess_strategies = [
+            preprocess_image_v1,
+            preprocess_image_v2,
+            preprocess_image_v3,
+            preprocess_image_v4,
+        ]
+        
+        all_full_texts = []
+        best_texts = []
+        best_steps = []
+        best_confidence = -1
+        
+        for strategy in preprocess_strategies:
+            processed_image, steps = strategy(image)
+            
+            temp_dir = os.path.join(os.path.dirname(__file__), "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            file_path = os.path.join(temp_dir, f"{image_id}_{strategy.__name__}.png")
+            processed_image.save(file_path)
 
-        temp_dir = os.path.join(os.path.dirname(__file__), "temp")
-        os.makedirs(temp_dir, exist_ok=True)
-        file_path = os.path.join(temp_dir, f"{image_id}.png")
-        processed_image.save(file_path)
-
-        result = ocr_models[language].ocr(file_path)
-
-        texts, full_text = parse_ocr_result(result)
+            result = ocr_models[language].ocr(file_path)
+            
+            if os.path.exists(file_path):
+                cleanup_file(file_path)
+            
+            texts, full_text = parse_ocr_result(result)
+            all_full_texts.append(full_text)
+            
+            avg_confidence = 0.0
+            if texts:
+                avg_confidence = sum(t.confidence for t in texts) / len(texts)
+            
+            if avg_confidence > best_confidence:
+                best_confidence = avg_confidence
+                best_texts = texts
+                best_steps = steps
+        
+        voted_full_text = vote_results(all_full_texts)
+        
+        if voted_full_text:
+            found_match = False
+            for text_obj in best_texts:
+                if text_obj.text.lower() == voted_full_text.lower():
+                    found_match = True
+                    break
+            
+            if not found_match:
+                corrected_voted = post_process_text(voted_full_text)
+                final_full_text = corrected_voted
+                final_texts = [OCRResult(
+                    text=corrected_voted,
+                    confidence=best_confidence,
+                    bounding_box=None
+                )]
+            else:
+                final_full_text = voted_full_text
+                final_texts = best_texts
+        else:
+            final_full_text = "".join([t.text for t in best_texts])
+            final_full_text = re.sub(r'\s+', '', final_full_text)
+            final_texts = best_texts
+        
+        final_full_text = post_process_text(final_full_text)
+        final_steps = best_steps + ["Multi-strategy voting applied"]
 
         return OCRResponse(
             success=True,
             image_id=image_id,
-            texts=texts,
-            full_text=full_text,
+            texts=final_texts,
+            full_text=final_full_text,
             language=language,
-            message=f"Successfully recognized {len(texts)} text(s)",
-            preprocessing_applied=steps
+            message=f"Successfully recognized {len(final_texts)} text(s) with multi-strategy voting",
+            preprocessing_applied=final_steps
         )
 
     except Exception as e:
@@ -259,24 +513,79 @@ async def ocr_url(request: URLOCRRequest):
         if image.mode != "RGB":
             image = image.convert("RGB")
 
-        processed_image, steps = preprocess_image(image)
+        preprocess_strategies = [
+            preprocess_image_v1,
+            preprocess_image_v2,
+            preprocess_image_v3,
+            preprocess_image_v4,
+        ]
+        
+        all_full_texts = []
+        best_texts = []
+        best_steps = []
+        best_confidence = -1
+        
+        for strategy in preprocess_strategies:
+            processed_image, steps = strategy(image)
+            
+            temp_dir = os.path.join(os.path.dirname(__file__), "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            file_path = os.path.join(temp_dir, f"{image_id}_{strategy.__name__}.png")
+            processed_image.save(file_path)
 
-        temp_dir = os.path.join(os.path.dirname(__file__), "temp")
-        os.makedirs(temp_dir, exist_ok=True)
-        file_path = os.path.join(temp_dir, f"{image_id}.png")
-        processed_image.save(file_path)
-
-        result = ocr_models[language].ocr(file_path)
-        texts, full_text = parse_ocr_result(result)
+            result = ocr_models[language].ocr(file_path)
+            
+            if os.path.exists(file_path):
+                cleanup_file(file_path)
+            
+            texts, full_text = parse_ocr_result(result)
+            all_full_texts.append(full_text)
+            
+            avg_confidence = 0.0
+            if texts:
+                avg_confidence = sum(t.confidence for t in texts) / len(texts)
+            
+            if avg_confidence > best_confidence:
+                best_confidence = avg_confidence
+                best_texts = texts
+                best_steps = steps
+        
+        voted_full_text = vote_results(all_full_texts)
+        
+        if voted_full_text:
+            found_match = False
+            for text_obj in best_texts:
+                if text_obj.text.lower() == voted_full_text.lower():
+                    found_match = True
+                    break
+            
+            if not found_match:
+                corrected_voted = post_process_text(voted_full_text)
+                final_full_text = corrected_voted
+                final_texts = [OCRResult(
+                    text=corrected_voted,
+                    confidence=best_confidence,
+                    bounding_box=None
+                )]
+            else:
+                final_full_text = voted_full_text
+                final_texts = best_texts
+        else:
+            final_full_text = "".join([t.text for t in best_texts])
+            final_full_text = re.sub(r'\s+', '', final_full_text)
+            final_texts = best_texts
+        
+        final_full_text = post_process_text(final_full_text)
+        final_steps = best_steps + ["Multi-strategy voting applied"]
 
         return OCRResponse(
             success=True,
             image_id=image_id,
-            texts=texts,
-            full_text=full_text,
+            texts=final_texts,
+            full_text=final_full_text,
             language=language,
-            message=f"Successfully recognized {len(texts)} text(s)",
-            preprocessing_applied=steps
+            message=f"Successfully recognized {len(final_texts)} text(s) with multi-strategy voting",
+            preprocessing_applied=final_steps
         )
 
     except Exception as e:
@@ -290,7 +599,7 @@ async def ocr_url(request: URLOCRRequest):
 async def root():
     return {
         "service": "CaptchaBreaker OCR API",
-        "version": "5.0.0",
+        "version": "6.0.0",
         "endpoints": {
             "POST /ocr/upload": "Upload image file",
             "POST /ocr/base64": "Base64 image data",
