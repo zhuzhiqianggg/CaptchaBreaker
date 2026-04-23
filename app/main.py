@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="CaptchaBreaker API",
     description="Local OCR service for captcha recognition using PaddleOCR",
-    version="6.0.0",
+    version="7.0.0",
     lifespan=lifespan
 )
 
@@ -92,15 +92,53 @@ CHAR_CONFUSION_MAP = {
     'S': ['5', 's'],
     '6': ['b', 'G'],
     'b': ['6', 'G'],
-    '8': ['B', 'B'],
-    'B': ['8', 'B'],
+    '8': ['B'],
+    'B': ['8'],
     '9': ['g', 'q'],
     'g': ['9', 'q'],
     'q': ['9', 'g'],
     'm': ['rn', 'nn'],
-    'w': ['vv', 'W'],
-    'W': ['w', 'VV'],
+    'w': ['vv'],
+    'W': ['VV'],
     'vv': ['w', 'W'],
+    'VV': ['W', 'w'],
+    '7': ['T', 't'],
+    'T': ['7'],
+    't': ['7'],
+    'd': ['cl', 'd'],
+    'D': ['D'],
+    'u': ['u'],
+    'U': ['U'],
+    'v': ['v', 'V'],
+    'V': ['v', 'V'],
+    'r': ['r'],
+    'R': ['R'],
+    'n': ['n'],
+    'N': ['N'],
+    'f': ['f'],
+    'F': ['F'],
+    '3': ['3'],
+    '4': ['4'],
+    'A': ['A', 'a'],
+    'a': ['A', 'a'],
+    'C': ['C'],
+    'c': ['c'],
+    'E': ['E'],
+    'e': ['e'],
+    'H': ['H'],
+    'h': ['h'],
+    'J': ['J'],
+    'j': ['j'],
+    'K': ['K'],
+    'k': ['k'],
+    'M': ['M'],
+    'P': ['P'],
+    'p': ['p'],
+    's': ['s'],
+    'X': ['X'],
+    'x': ['x'],
+    'Y': ['Y'],
+    'y': ['y'],
 }
 
 COMMON_PATTERNS = {
@@ -108,9 +146,150 @@ COMMON_PATTERNS = {
     'cl': 'd',
     'vv': 'w',
     'VV': 'W',
+    'll': 'w',
+    'II': 'w',
 }
 
+CAPTCHA_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+def levenshtein_distance(s1: str, s2: str) -> int:
+    """计算两个字符串的编辑距离"""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    
+    return previous_row[-1]
+
+
+def chars_similar(c1: str, c2: str) -> bool:
+    """检查两个字符是否容易混淆"""
+    if c1 == c2:
+        return True
+    
+    c1_lower = c1.lower()
+    c2_lower = c2.lower()
+    
+    if c1_lower == c2_lower:
+        return True
+    
+    if c2 in CHAR_CONFUSION_MAP.get(c1, []):
+        return True
+    
+    if c1 in CHAR_CONFUSION_MAP.get(c2, []):
+        return True
+    
+    return False
+
+
+def is_valid_captcha(text: str) -> bool:
+    """检查文本是否是有效的验证码格式"""
+    if not text:
+        return False
+    
+    if len(text) < 3 or len(text) > 10:
+        return False
+    
+    for char in text:
+        if char not in CAPTCHA_CHARS:
+            return False
+    
+    return True
+
+
+def generate_candidates(text: str) -> List[str]:
+    """基于混淆矩阵生成可能的候选修正"""
+    candidates = [text]
+    
+    for i, char in enumerate(text):
+        if char in CHAR_CONFUSION_MAP:
+            for replacement in CHAR_CONFUSION_MAP[char]:
+                if len(replacement) == 1:
+                    candidate = text[:i] + replacement + text[i+1:]
+                    candidates.append(candidate)
+    
+    for pattern, replacement in COMMON_PATTERNS.items():
+        if pattern in text:
+            candidate = text.replace(pattern, replacement)
+            candidates.append(candidate)
+    
+    return candidates
+
+
+def smart_correct(text: str, expected_length: int = 4) -> str:
+    """智能纠错引擎"""
+    if not text:
+        return text
+    
+    text = text.strip()
+    
+    if len(text) == expected_length and is_valid_captcha(text):
+        return text
+    
+    candidates = generate_candidates(text)
+    
+    if len(text) > expected_length:
+        for i in range(len(text) - expected_length + 1):
+            substring = text[i:i+expected_length]
+            if is_valid_captcha(substring):
+                candidates.append(substring)
+                for candidate in generate_candidates(substring):
+                    candidates.append(candidate)
+    
+    if len(text) < expected_length:
+        common_prefixes = [c for c in CAPTCHA_CHARS if c.isdigit() or c.isupper()]
+        
+        for prefix in common_prefixes:
+            candidate = prefix + text
+            if len(candidate) == expected_length and is_valid_captcha(candidate):
+                candidates.append(candidate)
+        
+        for position in range(len(text) + 1):
+            for char in ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F', 'G']:
+                candidate = text[:position] + char + text[position:]
+                if len(candidate) == expected_length and is_valid_captcha(candidate):
+                    candidates.append(candidate)
+    
+    best_candidate = text
+    best_score = -1
+    
+    for candidate in candidates:
+        if not is_valid_captcha(candidate):
+            continue
+        
+        if len(candidate) != expected_length:
+            continue
+        
+        distance = levenshtein_distance(candidate.lower(), text.lower())
+        similarity = 1.0 - (distance / max(len(candidate), len(text)))
+        
+        char_match_score = sum(
+            1 for c1, c2 in zip(candidate.lower(), text.lower()) 
+            if chars_similar(c1, c2)
+        ) / max(len(candidate), len(text))
+        
+        score = similarity * 0.4 + char_match_score * 0.6
+        
+        if score > best_score:
+            best_score = score
+            best_candidate = candidate
+    
+    return best_candidate
+
+
 def post_process_text(text: str) -> str:
+    """后处理 - 简单模式替换"""
     corrected = text
     for pattern, replacement in COMMON_PATTERNS.items():
         corrected = corrected.replace(pattern, replacement)
@@ -354,30 +533,22 @@ async def ocr_upload(
         voted_full_text = vote_results(all_full_texts)
         
         final_texts = best_texts
-        final_steps = best_steps + ["Multi-strategy voting applied"]
+        final_steps = best_steps + ["Multi-strategy voting applied", "Smart correction enabled"]
         
         if voted_full_text:
-            found_match = False
-            for i, text_obj in enumerate(best_texts):
-                if text_obj.text.lower() == voted_full_text.lower():
-                    found_match = True
-                    break
+            corrected = smart_correct(voted_full_text, expected_length=4)
+            final_full_text = corrected
             
-            if not found_match:
-                corrected_voted = post_process_text(voted_full_text)
+            if corrected != voted_full_text:
                 final_texts = [OCRResult(
-                    text=corrected_voted,
+                    text=corrected,
                     confidence=best_confidence,
                     bounding_box=None
                 )]
-                final_full_text = corrected_voted
-            else:
-                final_full_text = voted_full_text
         else:
             final_full_text = "".join([t.text for t in best_texts])
             final_full_text = re.sub(r'\s+', '', final_full_text)
-        
-        final_full_text = post_process_text(final_full_text)
+            final_full_text = smart_correct(final_full_text, expected_length=4)
 
         return OCRResponse(
             success=True,
@@ -456,30 +627,20 @@ async def ocr_base64(
         voted_full_text = vote_results(all_full_texts)
         
         if voted_full_text:
-            found_match = False
-            for text_obj in best_texts:
-                if text_obj.text.lower() == voted_full_text.lower():
-                    found_match = True
-                    break
-            
-            if not found_match:
-                corrected_voted = post_process_text(voted_full_text)
-                final_full_text = corrected_voted
-                final_texts = [OCRResult(
-                    text=corrected_voted,
-                    confidence=best_confidence,
-                    bounding_box=None
-                )]
-            else:
-                final_full_text = voted_full_text
-                final_texts = best_texts
+            corrected = smart_correct(voted_full_text, expected_length=4)
+            final_full_text = corrected
+            final_texts = [OCRResult(
+                text=corrected,
+                confidence=best_confidence,
+                bounding_box=None
+            )]
         else:
             final_full_text = "".join([t.text for t in best_texts])
             final_full_text = re.sub(r'\s+', '', final_full_text)
+            final_full_text = smart_correct(final_full_text, expected_length=4)
             final_texts = best_texts
         
-        final_full_text = post_process_text(final_full_text)
-        final_steps = best_steps + ["Multi-strategy voting applied"]
+        final_steps = best_steps + ["Multi-strategy voting applied", "Smart correction enabled"]
 
         return OCRResponse(
             success=True,
@@ -487,7 +648,7 @@ async def ocr_base64(
             texts=final_texts,
             full_text=final_full_text,
             language=language,
-            message=f"Successfully recognized {len(final_texts)} text(s) with multi-strategy voting",
+            message=f"Successfully recognized {len(final_texts)} text(s) with smart correction",
             preprocessing_applied=final_steps
         )
 
@@ -553,30 +714,20 @@ async def ocr_url(request: URLOCRRequest):
         voted_full_text = vote_results(all_full_texts)
         
         if voted_full_text:
-            found_match = False
-            for text_obj in best_texts:
-                if text_obj.text.lower() == voted_full_text.lower():
-                    found_match = True
-                    break
-            
-            if not found_match:
-                corrected_voted = post_process_text(voted_full_text)
-                final_full_text = corrected_voted
-                final_texts = [OCRResult(
-                    text=corrected_voted,
-                    confidence=best_confidence,
-                    bounding_box=None
-                )]
-            else:
-                final_full_text = voted_full_text
-                final_texts = best_texts
+            corrected = smart_correct(voted_full_text, expected_length=4)
+            final_full_text = corrected
+            final_texts = [OCRResult(
+                text=corrected,
+                confidence=best_confidence,
+                bounding_box=None
+            )]
         else:
             final_full_text = "".join([t.text for t in best_texts])
             final_full_text = re.sub(r'\s+', '', final_full_text)
+            final_full_text = smart_correct(final_full_text, expected_length=4)
             final_texts = best_texts
         
-        final_full_text = post_process_text(final_full_text)
-        final_steps = best_steps + ["Multi-strategy voting applied"]
+        final_steps = best_steps + ["Multi-strategy voting applied", "Smart correction enabled"]
 
         return OCRResponse(
             success=True,
@@ -584,7 +735,7 @@ async def ocr_url(request: URLOCRRequest):
             texts=final_texts,
             full_text=final_full_text,
             language=language,
-            message=f"Successfully recognized {len(final_texts)} text(s) with multi-strategy voting",
+            message=f"Successfully recognized {len(final_texts)} text(s) with smart correction",
             preprocessing_applied=final_steps
         )
 
@@ -599,7 +750,7 @@ async def ocr_url(request: URLOCRRequest):
 async def root():
     return {
         "service": "CaptchaBreaker OCR API",
-        "version": "6.0.0",
+        "version": "7.0.0",
         "endpoints": {
             "POST /ocr/upload": "Upload image file",
             "POST /ocr/base64": "Base64 image data",
