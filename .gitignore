@@ -4,21 +4,22 @@ __pycache__/
 *$py.class
 *.so
 .Python
-env/
-venv/
-ENV/
 *.egg-info/
 dist/
 build/
 
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
 # Temporary files
 temp/
+output/
 
 # Training data (collected for fine-tuning)
 data/collected/
-
-# Test results
-*.json
 
 # IDE
 .vscode/
@@ -29,3 +30,17 @@ data/collected/
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Model cache (PaddleOCR)
+.paddlex/
+.paddleocr/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment
+.env

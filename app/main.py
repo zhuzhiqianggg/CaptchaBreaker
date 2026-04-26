@@ -2,7 +2,9 @@ import os
 import uuid
 import base64
 import re
+import json
 import statistics
+import requests as http_requests
 from io import BytesIO
 from typing import Optional, List, Dict, Any, Tuple
 from contextlib import asynccontextmanager
@@ -25,6 +27,24 @@ async def lifespan(app: FastAPI):
     ocr_models["general"] = PaddleOCR(lang='ch')
     ocr_models["en"] = PaddleOCR(lang='en')
     print("PaddleOCR models loaded successfully")
+    
+    warmup = os.getenv("MODEL_WARMUP", "true").lower() == "true"
+    if warmup:
+        try:
+            print("Warming up OCR models...")
+            import numpy as np
+            warmup_img = Image.fromarray(np.random.randint(0, 255, (40, 100, 3), dtype=np.uint8))
+            temp_dir = os.path.join(os.path.dirname(__file__), "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            warmup_path = os.path.join(temp_dir, "warmup.png")
+            warmup_img.save(warmup_path)
+            for model in ocr_models.values():
+                model.ocr(warmup_path)
+            cleanup_file(warmup_path)
+            print("Model warmup completed")
+        except Exception as e:
+            print(f"Warmup skipped: {e}")
+    
     yield
     ocr_models.clear()
     print("PaddleOCR models unloaded")
@@ -59,10 +79,13 @@ class URLOCRRequest(BaseModel):
     language: str = "general"
 
 
+TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp")
+TRAIN_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "collected")
+
+
 def save_upload_file(upload_file: UploadFile, suffix: str = ".png") -> str:
-    temp_dir = os.path.join(os.path.dirname(__file__), "temp")
-    os.makedirs(temp_dir, exist_ok=True)
-    file_path = os.path.join(temp_dir, f"{uuid.uuid4().hex}{suffix}")
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    file_path = os.path.join(TEMP_DIR, f"{uuid.uuid4().hex}{suffix}")
     with open(file_path, "wb") as f:
         content = upload_file.file.read()
         f.write(content)
@@ -76,8 +99,6 @@ def cleanup_file(file_path: str):
     except Exception:
         pass
 
-
-TRAIN_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "collected")
 
 def get_train_dirs():
     return {
@@ -98,7 +119,6 @@ def save_training_data(
     final_text: str,
     corrected_text: str = None
 ):
-    """保存训练数据用于后期模型 fine-tuning"""
     try:
         train_dirs = get_train_dirs()
         
@@ -125,7 +145,6 @@ def save_training_data(
                 "preprocessing_steps": steps
             }
         
-        import json
         metadata_path = os.path.join(train_dirs["metadata"], f"{image_id}.json")
         with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
@@ -211,8 +230,15 @@ COMMON_PATTERNS = {
 
 CAPTCHA_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
+PREPROCESS_STRATEGIES = [
+    "preprocess_image_v1",
+    "preprocess_image_v2",
+    "preprocess_image_v3",
+    "preprocess_image_v4",
+]
+
+
 def levenshtein_distance(s1: str, s2: str) -> int:
-    """计算两个字符串的编辑距离"""
     if len(s1) < len(s2):
         return levenshtein_distance(s2, s1)
     
@@ -233,7 +259,6 @@ def levenshtein_distance(s1: str, s2: str) -> int:
 
 
 def chars_similar(c1: str, c2: str) -> bool:
-    """检查两个字符是否容易混淆"""
     if c1 == c2:
         return True
     
@@ -253,7 +278,6 @@ def chars_similar(c1: str, c2: str) -> bool:
 
 
 def is_valid_captcha(text: str) -> bool:
-    """检查文本是否是有效的验证码格式"""
     if not text:
         return False
     
@@ -268,7 +292,6 @@ def is_valid_captcha(text: str) -> bool:
 
 
 def generate_candidates(text: str) -> List[str]:
-    """基于混淆矩阵生成可能的候选修正"""
     candidates = [text]
     
     for i, char in enumerate(text):
@@ -277,6 +300,18 @@ def generate_candidates(text: str) -> List[str]:
                 if len(replacement) == 1:
                     candidate = text[:i] + replacement + text[i+1:]
                     candidates.append(candidate)
+        
+        if char.islower():
+            upper_char = char.upper()
+            if upper_char != char:
+                candidate = text[:i] + upper_char + text[i+1:]
+                candidates.append(candidate)
+        
+        if char.isupper():
+            lower_char = char.lower()
+            if lower_char != char and lower_char in CAPTCHA_CHARS:
+                candidate = text[:i] + lower_char + text[i+1:]
+                candidates.append(candidate)
     
     for pattern, replacement in COMMON_PATTERNS.items():
         if pattern in text:
@@ -287,7 +322,6 @@ def generate_candidates(text: str) -> List[str]:
 
 
 def smart_correct(text: str, expected_length: int = 4) -> str:
-    """智能纠错引擎"""
     if not text:
         return text
     
@@ -338,7 +372,15 @@ def smart_correct(text: str, expected_length: int = 4) -> str:
             if chars_similar(c1, c2)
         ) / max(len(candidate), len(text))
         
-        score = similarity * 0.4 + char_match_score * 0.6
+        case_bonus = 0.0
+        if len(candidate) == len(text):
+            case_matches = sum(
+                1 for c1, c2 in zip(candidate, text)
+                if (c1.isupper() == c2.isupper()) or (c1.lower() == c2.lower())
+            )
+            case_bonus = (case_matches / len(candidate)) * 0.1
+        
+        score = similarity * 0.4 + char_match_score * 0.6 + case_bonus
         
         if score > best_score:
             best_score = score
@@ -347,8 +389,37 @@ def smart_correct(text: str, expected_length: int = 4) -> str:
     return best_candidate
 
 
+def fix_case_by_confidence(text: str, ocr_texts: List[str]) -> str:
+    if not text or not ocr_texts:
+        return text
+    
+    if len(text) != 4:
+        return text
+    
+    case_votes = [0, 0, 0, 0]
+    
+    for ocr_text in ocr_texts:
+        if len(ocr_text) != 4:
+            continue
+        
+        for i, char in enumerate(ocr_text):
+            if char.isupper():
+                case_votes[i] += 1
+            elif char.islower():
+                case_votes[i] -= 1
+    
+    fixed_text = list(text)
+    for i in range(min(4, len(text))):
+        if text[i].isalpha():
+            if case_votes[i] > 0:
+                fixed_text[i] = text[i].upper()
+            elif case_votes[i] < 0:
+                fixed_text[i] = text[i].lower()
+    
+    return "".join(fixed_text)
+
+
 def post_process_text(text: str) -> str:
-    """后处理 - 简单模式替换"""
     corrected = text
     for pattern, replacement in COMMON_PATTERNS.items():
         corrected = corrected.replace(pattern, replacement)
@@ -356,7 +427,6 @@ def post_process_text(text: str) -> str:
 
 
 def preprocess_image_v1(image: Image.Image) -> Tuple[Image.Image, List[str]]:
-    """v1: 轻量级预处理 (当前 v5.0 策略)"""
     steps = ["v1:Light"]
     
     if image.mode != "RGB":
@@ -379,7 +449,6 @@ def preprocess_image_v1(image: Image.Image) -> Tuple[Image.Image, List[str]]:
 
 
 def preprocess_image_v2(image: Image.Image) -> Tuple[Image.Image, List[str]]:
-    """v2: 中等增强 (对比度+锐化)"""
     steps = ["v2:Medium"]
     
     if image.mode != "RGB":
@@ -405,7 +474,6 @@ def preprocess_image_v2(image: Image.Image) -> Tuple[Image.Image, List[str]]:
 
 
 def preprocess_image_v3(image: Image.Image) -> Tuple[Image.Image, List[str]]:
-    """v3: 二值化处理"""
     steps = ["v3:Binarize"]
     
     if image.mode != "RGB":
@@ -429,7 +497,6 @@ def preprocess_image_v3(image: Image.Image) -> Tuple[Image.Image, List[str]]:
 
 
 def preprocess_image_v4(image: Image.Image) -> Tuple[Image.Image, List[str]]:
-    """v4: 降噪处理"""
     steps = ["v4:Denoise"]
     
     if image.mode != "RGB":
@@ -506,7 +573,6 @@ def parse_ocr_result(result) -> Tuple[List[OCRResult], str]:
 
 
 def vote_results(results: List[str]) -> str:
-    """对多个识别结果进行投票，选择最优结果"""
     if not results:
         return ""
     
@@ -514,10 +580,13 @@ def vote_results(results: List[str]) -> str:
         return results[0]
     
     cleaned_results = []
+    original_results = {}
     for r in results:
         cleaned = re.sub(r'\s+', '', r).lower()
         if cleaned:
             cleaned_results.append(cleaned)
+            if cleaned not in original_results:
+                original_results[cleaned] = r
     
     if not cleaned_results:
         return ""
@@ -526,13 +595,102 @@ def vote_results(results: List[str]) -> str:
     most_common = counter.most_common()
     
     if most_common[0][1] > 1:
-        return most_common[0][0]
+        return original_results[most_common[0][0]]
     
     lengths = [len(r) for r in cleaned_results]
     avg_length = statistics.mean(lengths) if lengths else 0
     closest = min(cleaned_results, key=lambda x: abs(len(x) - avg_length))
     
-    return closest
+    return original_results[closest]
+
+
+def process_ocr_pipeline(image: Image.Image, language: str, image_id: str, file_path: str = None) -> OCRResponse:
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    
+    strategy_funcs = [
+        preprocess_image_v1,
+        preprocess_image_v2,
+        preprocess_image_v3,
+        preprocess_image_v4,
+    ]
+    
+    all_full_texts = []
+    best_texts = []
+    best_steps = []
+    best_confidence = -1
+    processed_images = {}
+    ocr_results = {}
+    
+    for strategy in strategy_funcs:
+        processed_image, steps = strategy(image)
+        
+        temp_path = os.path.join(TEMP_DIR, f"{image_id}_{strategy.__name__}.png")
+        processed_image.save(temp_path)
+        
+        result = ocr_models[language].predict(temp_path)
+        
+        texts, full_text = parse_ocr_result(result)
+        all_full_texts.append(full_text)
+        processed_images[strategy.__name__] = (processed_image.copy(), steps)
+        ocr_results[strategy.__name__] = full_text
+        
+        avg_confidence = 0.0
+        if texts:
+            avg_confidence = sum(t.confidence for t in texts) / len(texts)
+        
+        if avg_confidence > best_confidence:
+            best_confidence = avg_confidence
+            best_texts = texts
+            best_steps = steps
+        
+        cleanup_file(temp_path)
+    
+    voted_full_text = vote_results(all_full_texts)
+    
+    final_texts = best_texts
+    final_steps = best_steps + ["Multi-strategy voting applied", "Smart correction enabled"]
+    
+    corrected = None
+    if voted_full_text:
+        corrected = smart_correct(voted_full_text, expected_length=4)
+        final_full_text = corrected
+        
+        fixed_text = fix_case_by_confidence(final_full_text, all_full_texts)
+        if fixed_text != final_full_text:
+            final_full_text = fixed_text
+            final_steps.append("Case correction applied")
+        
+        if corrected != voted_full_text:
+            final_texts = [OCRResult(
+                text=final_full_text,
+                confidence=best_confidence,
+                bounding_box=None
+            )]
+    else:
+        final_full_text = "".join([t.text for t in best_texts])
+        final_full_text = re.sub(r'\s+', '', final_full_text)
+        final_full_text = smart_correct(final_full_text, expected_length=4)
+        final_full_text = fix_case_by_confidence(final_full_text, all_full_texts)
+        final_texts = best_texts
+    
+    save_training_data(
+        image_id=image_id,
+        original_image=image,
+        processed_images=processed_images,
+        ocr_results=ocr_results,
+        final_text=voted_full_text if voted_full_text else final_full_text,
+        corrected_text=corrected if voted_full_text and corrected != voted_full_text else None
+    )
+    
+    return OCRResponse(
+        success=True,
+        image_id=image_id,
+        texts=final_texts,
+        full_text=final_full_text,
+        language=language,
+        message=f"Successfully recognized {len(final_texts)} text(s) with multi-strategy voting",
+        preprocessing_applied=final_steps
+    )
 
 
 @app.post("/ocr/upload", response_model=OCRResponse)
@@ -554,80 +712,7 @@ async def ocr_upload(
 
         image = Image.open(file_path)
         
-        preprocess_strategies = [
-            preprocess_image_v1,
-            preprocess_image_v2,
-            preprocess_image_v3,
-            preprocess_image_v4,
-        ]
-        
-        all_full_texts = []
-        best_texts = []
-        best_steps = []
-        best_confidence = -1
-        processed_images = {}
-        ocr_results = {}
-        
-        for strategy in preprocess_strategies:
-            processed_image, steps = strategy(image)
-            
-            processed_path = file_path.replace(suffix, f"_processed_{strategy.__name__}.png")
-            processed_image.save(processed_path)
-            
-            result = ocr_models[language].ocr(processed_path)
-            
-            texts, full_text = parse_ocr_result(result)
-            all_full_texts.append(full_text)
-            processed_images[strategy.__name__] = (processed_image.copy(), steps)
-            ocr_results[strategy.__name__] = full_text
-            
-            avg_confidence = 0.0
-            if texts:
-                avg_confidence = sum(t.confidence for t in texts) / len(texts)
-            
-            if avg_confidence > best_confidence:
-                best_confidence = avg_confidence
-                best_texts = texts
-                best_steps = steps
-        
-        voted_full_text = vote_results(all_full_texts)
-        
-        final_texts = best_texts
-        final_steps = best_steps + ["Multi-strategy voting applied", "Smart correction enabled"]
-        
-        if voted_full_text:
-            corrected = smart_correct(voted_full_text, expected_length=4)
-            final_full_text = corrected
-            
-            if corrected != voted_full_text:
-                final_texts = [OCRResult(
-                    text=corrected,
-                    confidence=best_confidence,
-                    bounding_box=None
-                )]
-        else:
-            final_full_text = "".join([t.text for t in best_texts])
-            final_full_text = re.sub(r'\s+', '', final_full_text)
-            final_full_text = smart_correct(final_full_text, expected_length=4)
-        
-        save_training_data(
-            image_id=image_id,
-            original_image=image,
-            processed_images=processed_images,
-            ocr_results=ocr_results,
-            final_text=voted_full_text if voted_full_text else final_full_text,
-            corrected_text=corrected if voted_full_text and corrected != voted_full_text else None
-        )
-
-        return OCRResponse(
-            success=True,
-            image_id=image_id,
-            texts=final_texts,
-            full_text=final_full_text,
-            language=language,
-            message=f"Successfully recognized {len(final_texts)} text(s) with multi-strategy voting",
-            preprocessing_applied=final_steps
-        )
+        return process_ocr_pipeline(image, language, image_id, file_path)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
@@ -656,183 +741,29 @@ async def ocr_base64(
         if image.mode != "RGB":
             image = image.convert("RGB")
 
-        preprocess_strategies = [
-            preprocess_image_v1,
-            preprocess_image_v2,
-            preprocess_image_v3,
-            preprocess_image_v4,
-        ]
-        
-        all_full_texts = []
-        best_texts = []
-        best_steps = []
-        best_confidence = -1
-        processed_images = {}
-        ocr_results = {}
-        
-        for strategy in preprocess_strategies:
-            processed_image, steps = strategy(image)
-            
-            temp_dir = os.path.join(os.path.dirname(__file__), "temp")
-            os.makedirs(temp_dir, exist_ok=True)
-            file_path = os.path.join(temp_dir, f"{image_id}_{strategy.__name__}.png")
-            processed_image.save(file_path)
-
-            result = ocr_models[language].ocr(file_path)
-            
-            texts, full_text = parse_ocr_result(result)
-            all_full_texts.append(full_text)
-            processed_images[strategy.__name__] = (processed_image.copy(), steps)
-            ocr_results[strategy.__name__] = full_text
-            
-            avg_confidence = 0.0
-            if texts:
-                avg_confidence = sum(t.confidence for t in texts) / len(texts)
-            
-            if avg_confidence > best_confidence:
-                best_confidence = avg_confidence
-                best_texts = texts
-                best_steps = steps
-        
-        voted_full_text = vote_results(all_full_texts)
-        
-        if voted_full_text:
-            corrected = smart_correct(voted_full_text, expected_length=4)
-            final_full_text = corrected
-            final_texts = [OCRResult(
-                text=corrected,
-                confidence=best_confidence,
-                bounding_box=None
-            )]
-        else:
-            final_full_text = "".join([t.text for t in best_texts])
-            final_full_text = re.sub(r'\s+', '', final_full_text)
-            final_full_text = smart_correct(final_full_text, expected_length=4)
-            final_texts = best_texts
-        
-        final_steps = best_steps + ["Multi-strategy voting applied", "Smart correction enabled"]
-        
-        save_training_data(
-            image_id=image_id,
-            original_image=image,
-            processed_images=processed_images,
-            ocr_results=ocr_results,
-            final_text=voted_full_text if voted_full_text else final_full_text,
-            corrected_text=corrected if voted_full_text and corrected != voted_full_text else None
-        )
-
-        return OCRResponse(
-            success=True,
-            image_id=image_id,
-            texts=final_texts,
-            full_text=final_full_text,
-            language=language,
-            message=f"Successfully recognized {len(final_texts)} text(s) with smart correction",
-            preprocessing_applied=final_steps
-        )
+        return process_ocr_pipeline(image, language, image_id)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
-    finally:
-        if file_path:
-            cleanup_file(file_path)
 
 
 @app.post("/ocr/url", response_model=OCRResponse)
 async def ocr_url(request: URLOCRRequest):
-    import requests as req
-    
     language = request.language if request.language in ocr_models else "general"
     image_id = uuid.uuid4().hex
 
     try:
-        response = req.get(request.image_url, timeout=30)
+        response = http_requests.get(request.image_url, timeout=30)
         response.raise_for_status()
         image = Image.open(BytesIO(response.content))
         
         if image.mode != "RGB":
             image = image.convert("RGB")
 
-        preprocess_strategies = [
-            preprocess_image_v1,
-            preprocess_image_v2,
-            preprocess_image_v3,
-            preprocess_image_v4,
-        ]
-        
-        all_full_texts = []
-        best_texts = []
-        best_steps = []
-        best_confidence = -1
-        processed_images = {}
-        ocr_results = {}
-        
-        for strategy in preprocess_strategies:
-            processed_image, steps = strategy(image)
-            
-            temp_dir = os.path.join(os.path.dirname(__file__), "temp")
-            os.makedirs(temp_dir, exist_ok=True)
-            file_path = os.path.join(temp_dir, f"{image_id}_{strategy.__name__}.png")
-            processed_image.save(file_path)
-
-            result = ocr_models[language].ocr(file_path)
-            
-            texts, full_text = parse_ocr_result(result)
-            all_full_texts.append(full_text)
-            processed_images[strategy.__name__] = (processed_image.copy(), steps)
-            ocr_results[strategy.__name__] = full_text
-            
-            avg_confidence = 0.0
-            if texts:
-                avg_confidence = sum(t.confidence for t in texts) / len(texts)
-            
-            if avg_confidence > best_confidence:
-                best_confidence = avg_confidence
-                best_texts = texts
-                best_steps = steps
-        
-        voted_full_text = vote_results(all_full_texts)
-        
-        if voted_full_text:
-            corrected = smart_correct(voted_full_text, expected_length=4)
-            final_full_text = corrected
-            final_texts = [OCRResult(
-                text=corrected,
-                confidence=best_confidence,
-                bounding_box=None
-            )]
-        else:
-            final_full_text = "".join([t.text for t in best_texts])
-            final_full_text = re.sub(r'\s+', '', final_full_text)
-            final_full_text = smart_correct(final_full_text, expected_length=4)
-            final_texts = best_texts
-        
-        final_steps = best_steps + ["Multi-strategy voting applied", "Smart correction enabled"]
-        
-        save_training_data(
-            image_id=image_id,
-            original_image=image,
-            processed_images=processed_images,
-            ocr_results=ocr_results,
-            final_text=voted_full_text if voted_full_text else final_full_text,
-            corrected_text=corrected if voted_full_text and corrected != voted_full_text else None
-        )
-
-        return OCRResponse(
-            success=True,
-            image_id=image_id,
-            texts=final_texts,
-            full_text=final_full_text,
-            language=language,
-            message=f"Successfully recognized {len(final_texts)} text(s) with smart correction",
-            preprocessing_applied=final_steps
-        )
+        return process_ocr_pipeline(image, language, image_id)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
-    finally:
-        if file_path:
-            cleanup_file(file_path)
 
 
 @app.get("/")

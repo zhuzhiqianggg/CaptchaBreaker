@@ -1,0 +1,54 @@
+# CaptchaBreaker 自动训练配置
+
+# 数据收集
+data_collection:
+  enabled: true                    # 启用数据收集
+  save_dir: ./data/collected       # 数据保存目录
+  min_samples: 100                 # 触发训练的最小样本数
+  max_samples: 50000               # 最大保留样本数（超过则清理旧数据）
+
+# 训练调度
+scheduler:
+  enabled: true                    # 启用自动训练
+  check_interval: 3600             # 检查间隔（秒）
+  train_time: "02:00"              # 训练时间（避免高峰期）
+  timezone: Asia/Shanghai          # 时区
+
+# 训练参数
+training:
+  framework: paddlex               # 训练框架：paddlex / paddleocr
+  epochs: 100                      # 训练轮数
+  batch_size: 32                   # 批次大小（根据显存调整）
+  learning_rate: 0.0001            # 学习率
+  optimizer: adam                  # 优化器
+  pretrained_model: en_PP-OCRv5_mobile_rec  # 预训练模型
+  save_dir: ./output/finetune      # 模型保存目录
+
+# 评估参数
+evaluation:
+  test_data: ./data/samples        # 测试数据目录
+  min_accuracy: 0.90               # 最低准确率阈值
+  char_accuracy_weight: 0.3        # 字符级准确率权重
+
+# 部署参数
+deployment:
+  auto_deploy: true                # 自动部署
+  deploy_dir: ./models/custom      # 部署目录
+  backup_old: true                 # 备份旧模型
+  backup_dir: ./models/custom_backup  # 备份目录
+  rollback_on_fail: true           # 失败时回滚
+  hot_reload: true                 # 热重载（无需重启服务）
+
+# 通知设置
+notification:
+  enabled: false                   # 启用通知
+  type: webhook                    # 通知类型：webhook / email
+  webhook_url: ""                  # Webhook URL
+  email: ""                        # 邮箱地址
+
+# 日志设置
+logging:
+  level: INFO                      # 日志级别：DEBUG / INFO / WARNING / ERROR
+  file: logs/auto_train.log        # 日志文件
+  max_size: 10MB                   # 最大日志文件大小
+  max_files: 10                    # 保留的日志文件数

@@ -27,28 +27,18 @@ ENV/
 .git/
 .gitignore
 
-# Docker
+# Docker (not needed in container)
 docker/
-Dockerfile
-docker-compose.yml
-.dockerignore
 
 # Documentation (not needed in container)
 docs/
-*.md
-LICENSE
 
-# Test data and scripts
-scripts/
-data/samples/
-data/finetune/
+# Training data (collected for fine-tuning) - large and should be downloaded separately
+data/collected/
+
+# Output and temp files
+output/
 temp/
-*.png
-*.jpg
-*.json
-*.txt
-
-# Logs
 *.log
 logs/
 

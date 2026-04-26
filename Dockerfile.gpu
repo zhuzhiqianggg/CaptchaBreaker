@@ -1,7 +1,7 @@
-FROM python:3.11-slim
+FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
 
 LABEL maintainer="zhuzhiqianggg"
-LABEL description="CaptchaBreaker OCR Service - Local captcha recognition using PaddleOCR"
+LABEL description="CaptchaBreaker OCR Service - GPU accelerated version"
 LABEL version="7.0.0"
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -11,6 +11,10 @@ ENV PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    python3-pip \
     gcc \
     g++ \
     libglib2.0-0 \
@@ -19,12 +23,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender-dev \
     libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    && apt-get clean \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python
 
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir paddlepaddle-gpu==3.0.0 \
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip uninstall -y paddlepaddle || true
 
 COPY . .
 

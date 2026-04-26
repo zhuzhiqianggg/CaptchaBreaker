@@ -206,11 +206,28 @@ See [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md) for detailed improvement strate
 git clone https://github.com/zhuzhiqianggg/CaptchaBreaker.git
 cd CaptchaBreaker
 
-# 2. Start the service
+# 2. Start the service (model cached after first download)
 docker-compose up -d
 
 # 3. Verify the deployment
 curl http://localhost:8000/health
+```
+
+### Model Persistence
+
+**第一次启动**会下载约 500MB 的模型文件，之后自动缓存：
+- ✅ 模型存储在 Docker 持久化卷中
+- ✅ **修改代码后重建容器，不需要重新下载模型**
+- ✅ 即使删除容器，模型也会保留
+- 首次启动：~3-5 分钟（下载模型）
+- 后续启动：~30 秒（直接使用缓存）
+
+```bash
+# 查看模型缓存
+docker volume ls | grep ocr-models
+
+# 如果确实需要清除缓存（不推荐）
+docker volume rm ocr-models
 ```
 
 ### Docker Commands
@@ -228,10 +245,24 @@ docker-compose down
 # Restart service
 docker-compose restart
 
-# Update to latest version
+# Update to latest version (model will NOT re-download)
 git pull
 docker-compose up -d --build
 ```
+
+### GPU Acceleration
+
+如果有 NVIDIA GPU，可以使用 GPU 版本提升 5-10 倍性能：
+
+```bash
+# GPU 版本部署
+docker-compose -f docker-compose.gpu.yml up -d
+```
+
+要求：
+- NVIDIA GPU
+- 已安装 NVIDIA 驱动
+- 已安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 
 For detailed deployment guide, see [docs/DOCKER.md](docs/DOCKER.md)
 
@@ -281,11 +312,58 @@ curl -X POST "http://localhost:8000/ocr/url" \
   -d '{"image_url": "https://example.com/captcha.png", "language": "en"}'
 ```
 
+---
+
+## Model Fine-tuning (Auto Training)
+
+系统支持自动收集训练数据和模型 fine-tuning：
+
+### 1. 自动数据收集
+
+每次 OCR 识别都会自动保存训练数据：
+```bash
+# 查看已收集的数据量
+find data/collected/original -name "*.png" | wc -l
+```
+
+### 2. 自动训练
+
+当收集的数据达到阈值（默认 100 张）时：
+
+```bash
+# 检查并准备训练数据
+python scripts/auto_train.py
+
+# 自定义阈值
+python scripts/auto_train.py --threshold 500
+```
+
+### 3. 完整训练流程
+
+```bash
+# Step 1: 准备训练数据
+python scripts/prepare_training.py
+
+# Step 2: 运行训练（需要 PaddleOCR 完整安装）
+python scripts/train_model.py
+
+# Step 3: 部署训练好的模型
+# 模型会自动部署到 models/custom/ 目录
+```
+
+详细训练指南见 [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md)
+
 ## Documentation
 
+### Core Documentation
 - [Technical Architecture](docs/ARCHITECTURE.md) - System design and core technologies
 - [Optimization Roadmap](docs/OPTIMIZATION.md) - How to improve accuracy to 90%+
 - [API Reference](docs/API.md) - Detailed API documentation
+
+### Training Documentation
+- [Large Model Training Guide](docs/MODEL_TRAINING_GUIDE.md) - 大模型训练通用技术文档
+- [Captcha Training Guide](docs/CAPTCHA_TRAINING_GUIDE.md) - 验证码识别训练技术文档
+- [Auto Training Guide](docs/AUTO_TRAINING_GUIDE.md) - 自动训练系统使用指南
 
 ## Requirements
 
